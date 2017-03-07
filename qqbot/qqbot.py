@@ -197,10 +197,22 @@ class BasicAI:
             return '\n'.join(map(repr, bot.List(args[0])))
     
     def cmd_send(self, args, msg, bot):
-        '''3 send buddy|group|discuss x|uin=x|qq=x|name=x message'''
-        if len(args) >= 3:
-            return '\n'.join(bot.Send(args[0], args[1], ' '.join(args[2:])))
-    
+        '''3 send buddy|group|discuss x|uin=x|qq=x|name=x '''
+        #if len(args) >= 3:
+        #    return '\n'.join(bot.Send(args[0], args[1], ' '.join(args[2:])))
+        if len(args) >=2:
+   def cmd_send(self, args, msg, bot):
+        #'''3 send buddy|group|discuss x|uin=x|qq=x|name=x message'''
+        #if len(args) >= 3:
+        #    return '\n'.join(bot.Send(args[0], args[1], ' '.join(args[2:])))
+        '''3 send buddy|group|discuss x|uin=x|qq=x|name=x'''
+        if len(args) >= 2:
+            msgFile = open('/tmp/qqMsg.txt', 'r')
+            try:
+                sendMsg = msgFile.read()
+                return '\n'.join(bot.Send(args[0], args[1], sendMsg))
+            finally:
+                msgFile.close()
     def cmd_get(self, args, msg, bot):
         '''4 get buddy|group|discuss x|uin=x|qq=x|name=x'''
         if len(args) == 2:
