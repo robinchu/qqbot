@@ -7,36 +7,46 @@ Website -- https://github.com/pandolia/qqbot/
 Author  -- pandolia@yeah.net
 """
 
+import sys, os
+p = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if p not in sys.path:
+    sys.path.insert(0, p)
+
 import random, time, sys, subprocess
 
-from qconf import QConf
-from utf8logger import INFO, WARN, DEBUG
-from qsession import QLogin, QSession
-from qterm import QTermServer
-from common import Utf8Partition
-from qcontacts import QContact
-from messagefactory import MessageFactory, Message
+from qqbot.qconf import QConf
+from qqbot.utf8logger import INFO
+from qqbot.qsession import QLogin
+from qqbot.qterm import QTermServer
+from qqbot.common import Utf8Partition
+from qqbot.qcontacts import QContact
+from qqbot.messagefactory import MessageFactory, Message
+from qqbot.exitcode import QSESSION_ERROR, RESTART
+
+# see QQBot.LoginAndRun
+if sys.argv[-1] == '--subprocessCall':
+    isSubprocessCall = True
+    sys.argv.pop()
+else:
+    isSubprocessCall = False
 
 class QQBot(MessageFactory):
     def __init__(self, qq=None, user=None, conf=None, ai=None):
         MessageFactory.__init__(self)
         self.conf = conf if conf else QConf(qq, user)
-        self.conf.Display()
         ai = ai if ai else BasicAI()
         termServer = QTermServer(self.conf.termServerPort)
 
         self.On('qqmessage',   ai.OnQQMessage)          # main thread
         self.On('polltimeout', ai.OnPollTimeout)        # main thread
         self.On('termmessage', ai.OnTermMessage)        # main thread
-
-        self.On('pollcomplete',  QQBot.onPollComplete)  # main thread
-        self.On('fetchcomplete', QQBot.onFetchComplete) # main thread
+        self.On('pollcomplete',  QQBot.onPollComplete)  # main thread        
 
         self.AddGenerator(self.pollForever)             # child thread 1 
-        self.AddGenerator(self.fetchForever)            # child thread 2
-        self.AddGenerator(termServer.Run)               # child thread 3
+        self.AddGenerator(termServer.Run)               # child thread 2
     
     def Login(self):
+        self.conf.Display()
         session, contacts = QLogin(conf=self.conf)
         
         self.Get = contacts.Get                         # main thread
@@ -45,8 +55,39 @@ class QQBot(MessageFactory):
         self.send = session.Send                        # main thread
         
         self.poll = session.Copy().Poll                 # child thread 1
-        self.fetch = session.Copy().Fetch               # child thread 2
     
+    def LoginAndRun(self):
+        if isSubprocessCall:
+            self.Login()
+            self.Run()
+        else:
+            if sys.argv[0].endswith('py') or sys.argv[0].endswith('pyc'):
+                args = [sys.executable] + sys.argv
+            else:
+                args = sys.argv
+
+            args = args + ['--mailAuthCode', self.conf.mailAuthCode]
+            args = args + ['--qq', self.conf.qq]
+            args = args + ['--subprocessCall']
+
+            while True:
+                code = subprocess.call(args)
+                if code == 0:
+                    break
+                elif code == QSESSION_ERROR:
+                    if self.conf.restartOnOffline:
+                        args[-2] = self.conf.qq
+                        INFO('重新启动 QQBot ')
+                    else:
+                        break
+                elif code == RESTART:
+                    args[-2] = ''
+                    INFO('重新启动 QQBot （手工登陆）')
+                else:
+                    break
+
+            sys.exit(code)
+
     # send buddy|group|discuss x|uin=x|qq=x|name=x content
     # Send('buddy', '1234', 'hello')
     # Send('buddy', 'uin=1234', 'hello')
@@ -76,7 +117,7 @@ class QQBot(MessageFactory):
             while content:
                 front, content = Utf8Partition(content, 600)
                 self.send(contact.ctype, contact.uin, front)
-                INFO(result)            
+                INFO('%s：%s' % (result, front))
             return result
 
     def pollForever(self):
@@ -85,18 +126,6 @@ class QQBot(MessageFactory):
                 yield Message('pollcomplete', result=self.poll())
         finally:
             yield Message('stop', code=1)
-
-    def fetchForever(self):
-        INFO('已在后台运行 fetchForever 方法，每隔 5 分钟获取一次联系人资料')
-        while True:
-            time.sleep(300)
-            try:
-                contacts = self.fetch()
-            except (QSession.Error, Exception):
-                WARN(' fetchForever 方法出错')
-                DEBUG('', exc_info=True)
-            else:
-                yield Message('fetchcomplete', contacts=contacts)
     
     def onPollComplete(self, message):
         ctype, fromUin, memberUin, content = message.result
@@ -122,14 +151,15 @@ class QQBot(MessageFactory):
             contact, memberUin, memberName, content, self.SendTo
         ))
     
-    def onFetchComplete(self, message):
-        self.assignContacts(message.contacts)
-    
     def onStop(self, code):
         if code == 0:
             INFO('QQBot 正常停止')
-        else:
+        elif code == QSESSION_ERROR:
             INFO('QQBOT 异常停止')
+        elif code == RESTART:
+            pass
+        else:
+            INFO('QQBOT 异常停止, code=%d', code)
 
 class QQMessage(Message):
     mtype = 'qqmessage'
@@ -146,7 +176,7 @@ class QQMessage(Message):
             time.sleep(random.randint(1, 4))
             self.sendTo(self.contact, reply)
 
-class BasicAI:
+class BasicAI(object):
     def __init__(self):
         self.cmdFuncs = {}
         self.docs = []
@@ -161,18 +191,16 @@ class BasicAI:
         self.termUsage = '欢迎使用 QQBot ，使用方法：'
         self.qqUsage = self.termUsage
         for doc in self.docs:
-            self.termUsage += '\n    ' + doc[2:]
+            self.termUsage += '\n    qq ' + doc[2:]
             self.qqUsage += '\n   -' + doc[2:]
-        self.termUsage += '\n    quit'
 
     def OnPollTimeout(self, bot, msg):
         pass
     
     def OnQQMessage(self, bot, msg):
-        if msg.contact.ctype == 'buddy' and msg.content == 'qqbot --version':
+        if msg.content == '--version':
             msg.Reply('QQbot-' + bot.conf.version)
 
-        # 去掉通过 qq 消息来操作 QQBot 的方式
         # if msg.content.strip().startswith('-'):
         #    msg.content = msg.content.strip()[1:]
         #    msg.Reply(self.execute(bot, msg))
@@ -196,18 +224,28 @@ class BasicAI:
         if len(args) == 1:
             return '\n'.join(map(repr, bot.List(args[0])))
     
+   #def cmd_send(self, args, msg, bot):
+   #    '''3 send buddy|group|discuss x|uin=x|qq=x|name=x message'''
+   #    if len(args) >= 3:
+   #        return '\n'.join(bot.Send(args[0], args[1], ' '.join(args[2:])))
+   #    elif len(args) >= 2:                                                                                                                     
+   #        msgFile = open('/tmp/qqMsg.txt', 'r') 
+   #        try: 
+   #            sendMsg = msgFile.read() 
+   #            return '\n'.join(bot.Send(args[0], args[1], sendMsg)) 
+   #        finally: 
+   #             msgFile.close()
+   
     def cmd_send(self, args, msg, bot):
-        '''3 send buddy|group|discuss x|uin=x|qq=x|name=x message'''
-        if len(args) >= 3:
-            return '\n'.join(bot.Send(args[0], args[1], ' '.join(args[2:])))
-        '''3 send buddy|group|discuss x|uin=x|qq=x|name=x'''
-        elif len(args) >= 2:
-            msgFile = open('/tmp/qqMsg.txt', 'r')
-            try:
-                sendMsg = msgFile.read()
-                return '\n'.join(bot.Send(args[0], args[1], sendMsg))
-            finally:
-                msgFile.close()
+       '''3 send buddy|group|discuss x|uin=x|qq=x|name=x message'''
+       if len(args) == 3:
+           msgFile = open(args[2], 'r')
+           try: 
+               sendMsg = msgFile.read() 
+               return '\n'.join(bot.Send(args[0], args[1], sendMsg)) 
+           finally: 
+               msgFile.close()
+
     def cmd_get(self, args, msg, bot):
         '''4 get buddy|group|discuss x|uin=x|qq=x|name=x'''
         if len(args) == 2:
@@ -219,7 +257,7 @@ class BasicAI:
             result = []
             for contact in bot.Get(args[0], args[1]):
                 result.append(repr(contact))
-                for uin, name in contact.members.items():
+                for uin, name in list(contact.members.items()):
                     result.append('    成员：%s，uin%s' % (name, uin))
             return '\n'.join(result)
     
@@ -228,28 +266,18 @@ class BasicAI:
         if len(args) == 0:
             INFO('收到 stop 命令，QQBot 即将停止')
             msg.Reply('QQBot已停止')
-            bot.Stop()
+            bot.Stop(code=0)
+    
+    def cmd_restart(self, args, msg, bot):
+        '''7 restart'''
+        if len(args) == 0:
+            INFO('收到 restart 命令， QQBot 即将重启')
+            msg.Reply('QQBot已重启')
+            bot.Stop(code=RESTART)
 
 def Main():
     try:
-        if sys.argv[-1] == '--subprocessCall':
-            isSubprocessCall = True
-            sys.argv.pop()
-        else:
-            isSubprocessCall = False
-
-        conf = QConf()
-        if not conf.restartOnOffline or isSubprocessCall:
-            bot = QQBot(conf=conf)
-            bot.Login()
-            sys.exit(bot.Run())
-        else:
-            args = ['python', __file__] + sys.argv[1:] + \
-                   ['--mailAuthCode', conf.mailAuthCode, '--subprocessCall']
-            while subprocess.call(args) != 0:
-                INFO('重新启动 QQBot ')
+        bot = QQBot()
+        bot.LoginAndRun()
     except KeyboardInterrupt:
         sys.exit(0)
-
-if __name__ == '__main__':
-    Main()
